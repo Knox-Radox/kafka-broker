@@ -8,6 +8,7 @@ import com.advaith.broker.api.MetadataHandler;
 import com.advaith.broker.api.ProduceHandler;
 import com.advaith.broker.api.RequestDispatcher;
 import com.advaith.broker.log.LogManager;
+import com.advaith.broker.log.StorageConfig;
 import com.advaith.broker.network.NetworkServer;
 
 import java.io.IOException;
@@ -40,7 +41,16 @@ public final class Main {
                 Integer.parseInt(config.getProperty("advertised.port", String.valueOf(listenPort))),
                 "kafka-broker-m1-cluster");
 
-        LogManager logManager = new LogManager(parseTopics(config.getProperty("topics", "")));
+        StorageConfig storageConfig = new StorageConfig(
+                Long.parseLong(config.getProperty("log.segment.bytes", "1048576")),
+                Integer.parseInt(config.getProperty("log.index.interval.bytes", "4096")),
+                Long.parseLong(config.getProperty("log.retention.bytes", "-1")),
+                Long.parseLong(config.getProperty("log.retention.ms", "-1")),
+                Integer.parseInt(config.getProperty("log.flush.interval.messages", "1")),
+                Long.parseLong(config.getProperty("log.flush.interval.ms", "-1")));
+        Path dataDir = Path.of(config.getProperty("data.dir", "data"));
+
+        LogManager logManager = new LogManager(parseTopics(config.getProperty("topics", "")), dataDir, storageConfig);
 
         List<ApiHandler> handlers = List.of(
                 new ApiVersionsHandler(),
