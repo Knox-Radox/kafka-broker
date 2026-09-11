@@ -8,6 +8,7 @@ import com.advaith.broker.api.MetadataHandler;
 import com.advaith.broker.api.ProduceHandler;
 import com.advaith.broker.api.RequestDispatcher;
 import com.advaith.broker.log.LogManager;
+import com.advaith.broker.log.StorageConfig;
 import com.advaith.broker.network.NetworkServer;
 import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.ProtocolReader;
@@ -16,11 +17,13 @@ import com.advaith.broker.record.Crc32C;
 import com.advaith.broker.record.RecordBatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -38,12 +41,21 @@ class FullRoundTripIntegrationTest {
     private static final int PORT = 28095;
     private static final String TOPIC = "test";
 
+    @TempDir
+    Path tempDir;
+
     private NetworkServer server;
     private Thread serverThread;
 
     private void startBroker() throws InterruptedException {
         BrokerConfig brokerConfig = new BrokerConfig(0, "127.0.0.1", PORT, "test-cluster");
-        LogManager logManager = new LogManager(Map.of(TOPIC, 1));
+        // Segment size generously larger than this test's total data so
+        // nothing rolls mid-test — segment rolling has its own dedicated
+        // test (PartitionLogTest). flush=1 exercises the safest (and
+        // default) durability policy on every single append.
+        StorageConfig storageConfig = new StorageConfig(
+                10 * 1024 * 1024, 4096, StorageConfig.UNLIMITED, StorageConfig.UNLIMITED, 1, StorageConfig.UNLIMITED);
+        LogManager logManager = new LogManager(Map.of(TOPIC, 1), tempDir, storageConfig);
         List<ApiHandler> handlers = List.of(
                 new ApiVersionsHandler(),
                 new MetadataHandler(brokerConfig, logManager),
