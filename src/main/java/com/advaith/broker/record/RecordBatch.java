@@ -15,8 +15,13 @@ public final class RecordBatch {
 
     public static final byte SUPPORTED_MAGIC = 2;
 
-    /** Fixed header size: everything up to and including recordCount, before the records array starts. */
-    private static final int HEADER_SIZE = 61;
+    /**
+     * Fixed header size: everything up to and including recordCount, before
+     * the records array starts. Public because M2's segment storage needs
+     * it too, to know the minimum bytes required before a batch's header
+     * can even be attempted (see peekTotalSize()).
+     */
+    public static final int FIXED_HEADER_SIZE = 61;
 
     /** Raised when a batch fails validation; carries the Kafka error code the caller (ProduceHandler) should return. */
     public static final class InvalidRecordBatchException extends RuntimeException {
@@ -40,7 +45,7 @@ public final class RecordBatch {
     }
 
     public static RecordBatch parse(byte[] batchBytes) {
-        if (batchBytes.length < HEADER_SIZE) {
+        if (batchBytes.length < FIXED_HEADER_SIZE) {
             throw new InvalidRecordBatchException(Errors.CORRUPT_MESSAGE,
                     "batch is shorter than the fixed RecordBatch header (" + batchBytes.length + " bytes)");
         }
@@ -110,5 +115,25 @@ public final class RecordBatch {
      */
     public static void rewriteBaseOffset(byte[] batchBytes, long assignedBaseOffset) {
         ByteBuffer.wrap(batchBytes).putLong(0, assignedBaseOffset);
+    }
+
+    /**
+     * Reads just enough of a batch's header (baseOffset, batchLength) to
+     * know where the batch starts and how many total bytes it occupies —
+     * deliberately WITHOUT running CRC/magic validation. This is what the
+     * segment storage layer (M2) uses to navigate from one batch to the
+     * next while scanning a file it already knows is valid (a read, not a
+     * produce). Re-verifying every batch's checksum on every fetch would be
+     * pure wasted CPU on data that's already been validated once, either at
+     * produce time (parse() above) or at crash-recovery time — real Kafka
+     * doesn't re-checksum on every read either.
+     */
+    public record BatchLocation(long baseOffset, int totalSizeInBytes) {}
+
+    public static BatchLocation peekLocation(byte[] bytes, int offset) {
+        ByteBuffer buf = ByteBuffer.wrap(bytes);
+        long baseOffset = buf.getLong(offset);
+        int batchLength = buf.getInt(offset + 8);
+        return new BatchLocation(baseOffset, 12 + batchLength);
     }
 }
