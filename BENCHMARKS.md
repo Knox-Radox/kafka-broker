@@ -95,3 +95,122 @@ This is the one M4 number worth quoting — the acceptance criterion itself
 (§8.8.2) only requires "within `leader.lease.timeout.ms`" as a bound, not
 a specific value, so demonstrating the actual measured number (rather
 than asserting it in prose) is what makes this defensible.
+
+---
+
+## M5 §9.2 — chaos test: zero acknowledged-message loss under a real leader kill
+
+**Setup:** [`ChaosFailoverTest`](src/test/java/com/advaith/broker/chaos/ChaosFailoverTest.java)
+— 3 real broker OS processes (fresh temp data dirs, free ports, fast-but-real
+lease timing: `leader.lease.timeout.ms=1500`), a real hand-rolled producer
+sending 200 records with `acks=all` over the real wire protocol, waiting for
+the ISR to actually reach all 3 replicas before starting the timed load
+(see JOURNAL.md, 2026-09-12, for why that wait is itself load-bearing), then
+`SIGKILL`-ing the current leader after the 80th acknowledgment and
+continuing production against whichever broker Metadata reports next.
+After the run, the entire partition is read back from offset 0 and every
+acknowledged (offset, value) pair is checked for exact presence.
+
+**Result, run repeatedly (PRD §9.6 criterion 1 — "run it several times"):**
+
+| Run | Outcome | Acknowledged offsets verified | Approx. failover-to-first-post-kill-ack |
+|---|---|---|---|
+| 1-8 (this session) | **PASS**, all 8 | 200/200 every time | ~4-8s (bounded by `leader.lease.timeout.ms` + retry-loop granularity, same shape as M4's own §8.8 measurement) |
+
+Reproduce it yourself:
+```bash
+mvn -DskipTests package
+mvn test -Dtest=ChaosFailoverTest
+```
+(needs the jar built first — `mvn test` alone runs before `package` in the
+Maven lifecycle, so a from-clean `mvn test` skips this test via a JUnit
+`Assumption` rather than failing.)
+
+**What this proves, and what it explicitly doesn't:** every offset the
+producer received an `acks=all` acknowledgment for survived the leader's
+death, at the exact offset, with the exact value, in order — that is the
+literal, checkable content of "zero acknowledged-message loss." It does
+**not** claim exactly-once delivery (this project has no idempotent
+producer, PRD §2 — a message that failed with a connection reset right as
+its ack would have arrived, then got retried, can appear twice at two
+different offsets; that's a duplicate of *unacknowledged* data, never a
+loss of acknowledged data), and it does not claim safety against a
+correlated failure (all 3 replicas failing at once) or the network-
+partition-driven split-brain window §15.4 already names as a deliberate,
+understood cost of a lease over a real quorum.
+
+**A real bug this test found before it was passing repeatably** (see
+JOURNAL.md, 2026-09-12, for the full narration): a fast `acks=all` producer
+loop can rack up acknowledgments before either follower's replication link
+has completed even one round trip against a brand-new leader — meaning the
+ISR those early acks were computed against was, for real, size 1, no
+stronger a guarantee than `acks=1`, through no fault of the replication
+code. The fix was to the *test*, not the broker: wait for the ISR to
+reach all 3 replicas before trusting any acknowledgment's strength, the
+same discipline a real operator would apply before chaos-testing a
+still-forming cluster. This also surfaced a genuine, now-documented scope
+gap: this project has no `min.insync.replicas`-equivalent knob, so
+`acks=all` is only ever as strong as whatever the current ISR happens to
+be (see STUDY_GUIDE.md §17).
+
+---
+
+## M5 §9.3 — whole-system throughput/latency benchmark, to saturation
+
+**Setup:** [`ThroughputBenchmarkTest`](src/test/java/com/advaith/broker/benchmark/ThroughputBenchmarkTest.java)
+— one embedded broker (real `NetworkServer`, real sockets to localhost —
+unlike the chaos test, a benchmark doesn't need separate OS processes,
+only the chaos test's independent-failure premise does), 100-byte values,
+`acks=1`, a **batched** flush policy (`log.flush.interval.messages=1000`
+— deliberately NOT M2's per-record default, so this measures the
+network/protocol-layer ceiling rather than re-measuring M2's own
+already-documented ~120-170x fsync cost). Load is driven by an increasing
+number of concurrent persistent connections (1, 2, 4, 8, 16, ...), each
+hammering `Produce` in a tight loop for 1.5s; throughput is total records
+divided by wall time, until the gain over the previous level falls below
+10% (PRD §9.3's "the actual ceiling, found empirically, not assumed").
+
+Reproduce it yourself:
+```bash
+mvn test -Dtest=ThroughputBenchmarkTest
+```
+
+**Results** (this machine, this run — re-run to get your own):
+
+| Concurrency | Throughput | p50 | p95 | p99 |
+|---|---|---|---|---|
+| 1 | ~18,000-19,500 records/sec | ~40µs | ~100µs | ~180-230µs |
+| 2 | ~49,000-51,000 records/sec | ~30µs | ~65-68µs | ~110-122µs |
+| 4 | ~56,000-58,400 records/sec | ~62µs | ~89-99µs | ~150-166µs |
+| 8 (saturation) | **~57,000-59,200 records/sec** | ~107-112µs | ~179-191µs | ~330-460µs |
+
+**Saturation was reached at 8 concurrent connections**, consistently
+across repeated runs, at roughly **57,000-59,000 records/sec**.
+
+**What the broker was spending its time on at that point — profiled, not
+guessed:** a hand-rolled sampling profiler (this project has no profiler
+dependency budget, so every 2ms it snapshots the server's own single
+selector thread's real call stack — the same principle a real sampling
+profiler like async-profiler or JFR uses) shows, at the saturation level,
+the overwhelming majority of samples inside `SocketDispatcher.write0`
+(sending responses) and `SocketDispatcher.read0` (reading requests), with
+a real but secondary share in `UnixFileDispatcherImpl.force0`/`pwrite0`
+(fsync/write — batched, so present but not dominant) and `EPoll.ctl`
+(interest-set churn as connections' read/write readiness flips).
+
+**Is this the same bottleneck M1's gate-15 answer predicted?** Essentially
+yes, but more specific than "single-threaded" alone predicted: gate 15
+named the single selector thread itself as the structural ceiling (no
+request-level parallelism, full stop). This benchmark confirms that
+prediction AND sharpens it — the thread isn't CPU-bound doing encoding,
+CRC computation, or log-append bookkeeping at saturation; it's spending
+essentially all of its time in the raw socket I/O syscalls themselves
+(`write`/`read`), meaning the ceiling here is "how many small
+request/response round trips one OS thread can drive through the kernel's
+socket layer per second" — a slightly different, and more actionable,
+statement than "it's single-threaded" alone. A real next step (explicitly
+not built — see PRD §2/non-goals scope) would be batching multiple
+responses per `write()` call or moving to a small fixed worker pool behind
+the same selector, trading this project's simplicity for exactly the
+throughput this profile shows is being spent on syscall overhead, not
+computation.
