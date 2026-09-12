@@ -19,6 +19,11 @@ import java.util.Iterator;
  * makes it safe for everything above this layer (codec, handlers, log) to
  * skip synchronization in M1. The cost is a throughput ceiling worth
  * measuring, not assuming.
+ *
+ * Since M3 (PRD §7.3), {@code select()} no longer always blocks forever:
+ * an optional {@link SelectorTicker} can bound its timeout and gets a
+ * {@code tick()} every iteration, which is what lets a parked Fetch
+ * request's timeout fire even though nothing arrived on any socket.
  */
 public final class NetworkServer implements Runnable {
 
@@ -26,14 +31,20 @@ public final class NetworkServer implements Runnable {
 
     private final int port;
     private final FrameHandler frameHandler;
+    private final SelectorTicker ticker;
     private volatile boolean running = true;
 
     private Selector selector;
     private ServerSocketChannel serverChannel;
 
     public NetworkServer(int port, FrameHandler frameHandler) {
+        this(port, frameHandler, SelectorTicker.NONE);
+    }
+
+    public NetworkServer(int port, FrameHandler frameHandler, SelectorTicker ticker) {
         this.port = port;
         this.frameHandler = frameHandler;
+        this.ticker = ticker;
     }
 
     /** Binds and starts the loop. Blocks the calling thread until stop() is called. */
@@ -54,10 +65,19 @@ public final class NetworkServer implements Runnable {
 
         while (running) {
             try {
-                // Blocks here until at least one channel is ready, or a
-                // registered interest changes wake it. This is *the* line
-                // that makes one thread sufficient: no busy-polling.
-                selector.select();
+                // Blocks here until at least one channel is ready, a
+                // registered interest changes wakes it, OR (since M3) the
+                // ticker's own deadline arrives — a bounded timeout instead
+                // of an indefinite one is the one, minimal change needed to
+                // let the loop notice time passing without a second thread.
+                // Still zero busy-polling: with nothing pending, the ticker
+                // reports -1 and this blocks exactly as it always did.
+                long timeout = ticker.millisUntilNextDeadline();
+                if (timeout < 0) {
+                    selector.select();
+                } else {
+                    selector.select(Math.max(1, timeout));
+                }
             } catch (IOException e) {
                 log.error("selector.select() failed, shutting down", e);
                 break;
@@ -93,6 +113,21 @@ public final class NetworkServer implements Runnable {
                     log.warn("unexpected error handling connection, closing it", e);
                     closeQuietly(key);
                 }
+            }
+
+            // Runs every iteration regardless of what woke select() up —
+            // a produce that just satisfied a parked fetch already
+            // completed it above (via the handler path), so most ticks
+            // find nothing to do; this is specifically what catches a
+            // parked fetch whose max_wait_ms elapsed with no I/O at all.
+            try {
+                ticker.tick();
+            } catch (RuntimeException e) {
+                // Same defence-in-depth principle as the per-key handling
+                // above: a bug in whatever's ticking (Fetch long-polling,
+                // consumer-group rebalance timers) must not kill the whole
+                // selector loop.
+                log.warn("unexpected error in selector ticker", e);
             }
         }
 

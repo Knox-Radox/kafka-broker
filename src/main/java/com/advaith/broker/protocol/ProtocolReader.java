@@ -164,7 +164,15 @@ public final class ProtocolReader {
         return readRawBytes(lengthPlusOne - 1);
     }
 
-    private byte[] readRawBytes(int length) {
+    /**
+     * Reads exactly {@code length} raw bytes with no length prefix of its
+     * own to interpret first. Public (not just an internal helper for the
+     * *_BYTES primitives above) because a record's key/value fields (PRD
+     * §5.4) are VARINT-length-prefixed, not INT32/COMPACT — callers that
+     * need those read the varint length themselves, then call straight
+     * through to this.
+     */
+    public byte[] readRawBytes(int length) {
         byte[] out = new byte[length];
         buf.get(out);
         return out;

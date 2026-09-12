@@ -50,4 +50,13 @@ public final class LogManager {
     public Set<String> topicNames() {
         return partitionsByTopic.keySet();
     }
+
+    /** Flushes and closes every partition's file handles — graceful shutdown, and how a test simulates a restart by opening a fresh LogManager against the same dataDir afterward (PartitionLog.close() carries the same caveat: a real kill -9 never calls this at all). */
+    public void close() {
+        for (PartitionLog[] partitions : partitionsByTopic.values()) {
+            for (PartitionLog partition : partitions) {
+                partition.close();
+            }
+        }
+    }
 }

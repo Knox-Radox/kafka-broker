@@ -18,14 +18,16 @@ public final class HeaderVersions {
             return apiVersionsHeaders(apiVersion);
         }
 
-        // The other four APIs we implement (Produce v3, Fetch v4,
-        // ListOffsets v1, Metadata v4) were each chosen by the PRD
-        // specifically because they sit below that API's real flexible-
-        // version threshold in upstream Kafka (Metadata isn't flexible
-        // until v9, Produce until v9, Fetch until v12, ListOffsets until
-        // v6). Below that threshold the rule is uniform: request header v1
-        // (client_id, no tag buffer), response header v0 (no tag buffer).
-        // This is hard-coded rather than derived because we don't
+        // Every other API we implement (Produce v3, Fetch v4, ListOffsets
+        // v1, Metadata v4, and — since M3 — OffsetCommit v1, OffsetFetch
+        // v1, FindCoordinator v0, JoinGroup v1, Heartbeat v0, LeaveGroup
+        // v0, SyncGroup v0) was chosen specifically because it sits below
+        // that API's real flexible-version threshold in upstream Kafka
+        // (thresholds range from v3 for FindCoordinator up to v12 for
+        // Fetch — see ApiKey's own comment for where each version came
+        // from). Below that threshold the rule is uniform: request header
+        // v1 (client_id, no tag buffer), response header v0 (no tag
+        // buffer). This is hard-coded rather than derived because we don't
         // implement — and therefore don't need to know the thresholds for —
         // any other version of these APIs; see ApiKey for the versions we
         // actually advertise.

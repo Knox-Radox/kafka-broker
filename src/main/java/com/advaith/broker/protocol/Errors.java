@@ -16,4 +16,11 @@ public final class Errors {
     public static final short INVALID_REQUEST = 42;
     public static final short UNSUPPORTED_VERSION = 35;
     public static final short INVALID_RECORD = 87;
+
+    // M3 consumer groups (PRD §7.4/§7.5)
+    public static final short ILLEGAL_GENERATION = 22;
+    public static final short INCONSISTENT_GROUP_PROTOCOL = 23;
+    public static final short UNKNOWN_MEMBER_ID = 25;
+    public static final short INVALID_SESSION_TIMEOUT = 26;
+    public static final short REBALANCE_IN_PROGRESS = 27;
 }

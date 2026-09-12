@@ -13,6 +13,22 @@ public enum ApiKey {
     FETCH(1, (short) 4, (short) 4),
     LIST_OFFSETS(2, (short) 1, (short) 1),
     METADATA(3, (short) 4, (short) 4),
+    // M3 consumer groups (PRD §7.4). Every version chosen here is, like the
+    // five M1 APIs above, deliberately the oldest non-flexible version that
+    // carries the fields we need — verified against the real, versioned
+    // JSON schemas in the Apache Kafka source (clients/src/main/resources/
+    // common/message/*.json), not recalled from memory, specifically
+    // because getting one of these seven subtly wrong (a field order, a
+    // STRING where it should be NULLABLE_STRING) is exactly the kind of
+    // mistake M1's ListOffsets throttle_time_ms bug already taught us to
+    // check for rather than assume (see JOURNAL.md, 2026-09-11).
+    OFFSET_COMMIT(8, (short) 1, (short) 1),
+    OFFSET_FETCH(9, (short) 1, (short) 1),
+    FIND_COORDINATOR(10, (short) 0, (short) 0),
+    JOIN_GROUP(11, (short) 1, (short) 1),
+    HEARTBEAT(12, (short) 0, (short) 0),
+    LEAVE_GROUP(13, (short) 0, (short) 0),
+    SYNC_GROUP(14, (short) 0, (short) 0),
     // ApiVersions alone advertises min=0: it's the API a client uses to
     // discover every other API's version range, including its own, so it
     // cannot rely on that same negotiation to recover if its first guess is
