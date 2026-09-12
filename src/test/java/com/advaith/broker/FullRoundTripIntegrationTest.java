@@ -9,6 +9,7 @@ import com.advaith.broker.api.ProduceHandler;
 import com.advaith.broker.api.RequestDispatcher;
 import com.advaith.broker.log.LogManager;
 import com.advaith.broker.log.StorageConfig;
+import com.advaith.broker.metrics.Metrics;
 import com.advaith.broker.network.NetworkServer;
 import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.ProtocolReader;
@@ -63,7 +64,7 @@ class FullRoundTripIntegrationTest {
                 new FetchHandler(logManager),
                 new ListOffsetsHandler(logManager));
 
-        server = new NetworkServer(PORT, new RequestDispatcher(handlers));
+        server = new NetworkServer(PORT, new RequestDispatcher(handlers, new Metrics()));
         serverThread = new Thread(server, "round-trip-test-server");
         serverThread.setDaemon(true);
         serverThread.start();

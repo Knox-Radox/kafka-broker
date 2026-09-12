@@ -19,6 +19,9 @@ import com.advaith.broker.group.GroupCoordinator;
 import com.advaith.broker.group.OffsetStore;
 import com.advaith.broker.log.LogManager;
 import com.advaith.broker.log.StorageConfig;
+import com.advaith.broker.metrics.Metrics;
+import com.advaith.broker.metrics.MetricsExporter;
+import com.advaith.broker.metrics.MetricsServer;
 import com.advaith.broker.network.NetworkServer;
 import com.advaith.broker.network.SelectorTicker;
 import com.advaith.broker.replication.PeerInfo;
@@ -115,7 +118,16 @@ public final class Main {
                 new OffsetCommitHandler(groupCoordinator, offsetStore),
                 new OffsetFetchHandler(offsetStore)
         );
-        RequestDispatcher dispatcher = new RequestDispatcher(handlers);
+        Metrics metrics = new Metrics();
+        RequestDispatcher dispatcher = new RequestDispatcher(handlers, metrics);
+
+        // M5 (PRD §9.4): a real Prometheus text-exposition endpoint on its
+        // own port, its own JDK HttpServer, its own thread pool — see
+        // MetricsServer's javadoc for why it must never share
+        // NetworkServer's single selector thread.
+        int metricsPort = Integer.parseInt(config.getProperty("metrics.port", "9404"));
+        MetricsExporter metricsExporter = new MetricsExporter(metrics, logManager, replicaManager);
+        MetricsServer metricsServer = new MetricsServer(metricsPort, metricsExporter);
 
         // Three independent things need the selector loop to wake itself
         // up on a schedule, for the same underlying reason (§7.3's
@@ -127,9 +139,11 @@ public final class Main {
         // dedicated per-peer threads (see PeerReplicator's javadoc for why).
         NetworkServer server = new NetworkServer(listenPort, dispatcher, SelectorTicker.combine(fetchHandler, groupCoordinator, produceHandler));
         replicaManager.start();
+        metricsServer.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop();
             replicaManager.stop();
+            metricsServer.stop();
         }));
         server.run();
     }

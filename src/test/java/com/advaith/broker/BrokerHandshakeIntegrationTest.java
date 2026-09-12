@@ -2,6 +2,7 @@ package com.advaith.broker;
 
 import com.advaith.broker.api.ApiVersionsHandler;
 import com.advaith.broker.api.RequestDispatcher;
+import com.advaith.broker.metrics.Metrics;
 import com.advaith.broker.network.NetworkServer;
 import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.ProtocolReader;
@@ -42,7 +43,7 @@ class BrokerHandshakeIntegrationTest {
 
     @Test
     void apiVersionsHandshakeSucceedsOverARealSocket() throws Exception {
-        RequestDispatcher dispatcher = new RequestDispatcher(List.of(new ApiVersionsHandler()));
+        RequestDispatcher dispatcher = new RequestDispatcher(List.of(new ApiVersionsHandler()), new Metrics());
         server = new NetworkServer(PORT, dispatcher);
         serverThread = new Thread(server, "handshake-test-server");
         serverThread.setDaemon(true);

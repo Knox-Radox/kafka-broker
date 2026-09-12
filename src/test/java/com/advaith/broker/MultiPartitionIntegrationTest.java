@@ -9,6 +9,7 @@ import com.advaith.broker.api.ProduceHandler;
 import com.advaith.broker.api.RequestDispatcher;
 import com.advaith.broker.log.LogManager;
 import com.advaith.broker.log.StorageConfig;
+import com.advaith.broker.metrics.Metrics;
 import com.advaith.broker.network.NetworkServer;
 import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.ProtocolReader;
@@ -69,7 +70,7 @@ class MultiPartitionIntegrationTest {
                 fetchHandler,
                 new ListOffsetsHandler(logManager));
 
-        server = new NetworkServer(PORT, new RequestDispatcher(handlers), fetchHandler);
+        server = new NetworkServer(PORT, new RequestDispatcher(handlers, new Metrics()), fetchHandler);
         serverThread = new Thread(server, "multi-partition-test-server");
         serverThread.setDaemon(true);
         serverThread.start();
