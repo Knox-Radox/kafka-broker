@@ -15,6 +15,12 @@ class ApiVersionsHandlerTest {
 
     private final ApiVersionsHandler handler = new ApiVersionsHandler();
 
+    // ApiVersionsHandler never calls context.sendAsync(), so a null
+    // connection is safe here — only apiVersion is actually read.
+    private static RequestContext context(short apiVersion) {
+        return new RequestContext(apiVersion, 1, (short) 0, null);
+    }
+
     @Test
     void supportedVersionAdvertisesAllFiveApisWithNoError() {
         ProtocolWriter requestBody = new ProtocolWriter();
@@ -22,7 +28,7 @@ class ApiVersionsHandlerTest {
         requestBody.writeCompactString("1.0");
         requestBody.writeEmptyTagBuffer();
 
-        byte[] responseBytes = handler.handle((short) 3, new ProtocolReader(requestBody.toByteArray()));
+        byte[] responseBytes = handler.handle(context((short) 3), new ProtocolReader(requestBody.toByteArray()));
         ProtocolReader response = new ProtocolReader(responseBytes);
 
         assertEquals(Errors.NONE, response.readInt16());
@@ -45,7 +51,7 @@ class ApiVersionsHandlerTest {
     void unsupportedVersionRepliesWithV0ShapeAndErrorThirtyFive() {
         // The handler must not even attempt to read a request body in this
         // path — an unsupported version might not be shaped like v3 at all.
-        byte[] responseBytes = handler.handle((short) 99, new ProtocolReader(new byte[0]));
+        byte[] responseBytes = handler.handle(context((short) 99), new ProtocolReader(new byte[0]));
         ProtocolReader response = new ProtocolReader(responseBytes);
 
         assertEquals(Errors.UNSUPPORTED_VERSION, response.readInt16());
