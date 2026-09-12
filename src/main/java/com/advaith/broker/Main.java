@@ -21,11 +21,15 @@ import com.advaith.broker.log.LogManager;
 import com.advaith.broker.log.StorageConfig;
 import com.advaith.broker.network.NetworkServer;
 import com.advaith.broker.network.SelectorTicker;
+import com.advaith.broker.replication.PeerInfo;
+import com.advaith.broker.replication.ReplicaManager;
+import com.advaith.broker.replication.ReplicationConfig;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +73,17 @@ public final class Main {
         LogManager logManager = new LogManager(topics, dataDir, storageConfig);
         OffsetStore offsetStore = new OffsetStore(logManager, offsetsTopicPartitions);
 
+        List<PeerInfo> peers = parsePeers(config.getProperty("broker.peers", ""));
+        ReplicationConfig replicationConfig = new ReplicationConfig(
+                peers,
+                Integer.parseInt(config.getProperty("replication.factor", "1")),
+                Long.parseLong(config.getProperty("replica.lag.time.max.ms", "10000")),
+                Long.parseLong(config.getProperty("leader.lease.renew.interval.ms", "2000")),
+                Long.parseLong(config.getProperty("leader.lease.timeout.ms", "6000")),
+                Integer.parseInt(config.getProperty("replica.fetch.max.wait.ms", "500")),
+                Integer.parseInt(config.getProperty("replica.fetch.min.bytes", "1")));
+        ReplicaManager replicaManager = new ReplicaManager(brokerConfig.brokerId(), logManager, replicationConfig);
+
         GroupConfig groupConfig = new GroupConfig(
                 Integer.parseInt(config.getProperty("group.min.session.timeout.ms", "6000")),
                 Integer.parseInt(config.getProperty("group.max.session.timeout.ms", "300000")),
@@ -77,13 +92,21 @@ public final class Main {
         GroupCoordinator groupCoordinator = new GroupCoordinator(groupConfig);
 
         int fetchMaxWaitMsCap = Integer.parseInt(config.getProperty("fetch.max.wait.ms", "500"));
-        FetchHandler fetchHandler = new FetchHandler(logManager, fetchMaxWaitMsCap);
+        FetchHandler fetchHandler = new FetchHandler(logManager, fetchMaxWaitMsCap, replicaManager);
+        ProduceHandler produceHandler = new ProduceHandler(logManager, fetchHandler, replicaManager);
+        // ProduceHandler needs to hear about every HWM movement (its own
+        // leader-side appends AND every incoming replica Fetch that might
+        // move the ISR minimum) to wake a parked acks=-1 request the
+        // instant it's satisfied (PRD §8.6) instead of waiting for its own
+        // next timeout sweep.
+        replicaManager.setHwmAdvancedListener(produceHandler);
+
         List<ApiHandler> handlers = List.of(
                 new ApiVersionsHandler(),
-                new MetadataHandler(brokerConfig, logManager),
-                new ProduceHandler(logManager, fetchHandler),
+                new MetadataHandler(brokerConfig, logManager, replicaManager, peers),
+                produceHandler,
                 fetchHandler,
-                new ListOffsetsHandler(logManager),
+                new ListOffsetsHandler(logManager, replicaManager),
                 new FindCoordinatorHandler(brokerConfig, offsetsTopicPartitions),
                 new JoinGroupHandler(groupCoordinator),
                 new SyncGroupHandler(groupCoordinator),
@@ -94,13 +117,20 @@ public final class Main {
         );
         RequestDispatcher dispatcher = new RequestDispatcher(handlers);
 
-        // Two independent things need the selector loop to wake itself up
-        // on a schedule, for the same underlying reason (§7.3's javadoc)
-        // but driven by unrelated state: a parked Fetch's timeout, and a
-        // group's rebalance/heartbeat deadlines. SelectorTicker.combine
-        // lets NetworkServer keep holding just one reference.
-        NetworkServer server = new NetworkServer(listenPort, dispatcher, SelectorTicker.combine(fetchHandler, groupCoordinator));
-        Runtime.getRuntime().addShutdownHook(new Thread(server::stop));
+        // Three independent things need the selector loop to wake itself
+        // up on a schedule, for the same underlying reason (§7.3's
+        // javadoc) but driven by unrelated state: a parked Fetch's
+        // timeout, a group's rebalance/heartbeat deadlines, and (since M4)
+        // a parked acks=-1 produce's own timeout_ms. SelectorTicker.combine
+        // lets NetworkServer keep holding just one reference. The replica
+        // fetch loop itself is NOT one of these — it runs on its own
+        // dedicated per-peer threads (see PeerReplicator's javadoc for why).
+        NetworkServer server = new NetworkServer(listenPort, dispatcher, SelectorTicker.combine(fetchHandler, groupCoordinator, produceHandler));
+        replicaManager.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.stop();
+            replicaManager.stop();
+        }));
         server.run();
     }
 
@@ -116,5 +146,19 @@ public final class Main {
             topics.put(parts[0], Integer.parseInt(parts[1]));
         }
         return topics;
+    }
+
+    /** Parses "brokerId:host:port,brokerId2:host2:port2" (PRD §8.2/§8.7) — every OTHER broker in the cluster, never including this one. */
+    private static List<PeerInfo> parsePeers(String peersProperty) {
+        List<PeerInfo> peers = new ArrayList<>();
+        for (String entry : peersProperty.split(",")) {
+            String trimmed = entry.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            String[] parts = trimmed.split(":");
+            peers.add(new PeerInfo(Integer.parseInt(parts[0]), parts[1], Integer.parseInt(parts[2])));
+        }
+        return peers;
     }
 }

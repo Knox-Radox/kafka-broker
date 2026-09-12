@@ -190,12 +190,24 @@ public final class PartitionLog {
      * exceeds maxBytes.
      */
     public byte[] read(long fromOffset, int maxBytes) {
+        return read(fromOffset, maxBytes, Long.MAX_VALUE);
+    }
+
+    /**
+     * Same contract, plus a ceiling offset no returned batch may reach or
+     * pass (PRD §8.4's high-water mark cap — see LogSegment.read()'s
+     * three-arg overload for why this exists). {@code Long.MAX_VALUE}
+     * (the two-arg overload above) means "no ceiling" — a replica
+     * catching up must be able to read past the HWM, all the way to the
+     * raw log end.
+     */
+    public byte[] read(long fromOffset, int maxBytes, long ceilingOffsetExclusive) {
         if (fromOffset < logStartOffset()) {
             throw new OffsetOutOfRangeException(
                     "requested offset " + fromOffset + " is before log start " + logStartOffset());
         }
-        if (fromOffset >= logEndOffset()) {
-            return new byte[0]; // caught up to the tail — no error for this case
+        if (fromOffset >= logEndOffset() || fromOffset >= ceilingOffsetExclusive) {
+            return new byte[0]; // caught up to the tail (or to the cap) — no error for this case
         }
 
         try {
@@ -209,12 +221,54 @@ public final class PartitionLog {
             for (int i = segments.size() - 1; i >= 0; i--) {
                 LogSegment segment = segments.get(i);
                 if (segment.baseOffset() <= fromOffset) {
-                    return segment.read(fromOffset, maxBytes);
+                    return segment.read(fromOffset, maxBytes, ceilingOffsetExclusive);
                 }
             }
             return new byte[0]; // unreachable given the logStartOffset() check above, but never throw from a read
         } catch (IOException e) {
             throw new UncheckedIOException("failed to read partition log at " + dir, e);
+        }
+    }
+
+    /**
+     * Discards everything from {@code newEndOffsetExclusive} onward — M4's
+     * log truncation on divergence (PRD §8.3): a follower that turns out
+     * to be AHEAD of its new leader (the old leader had accepted writes
+     * the new leader never received) must give up that diverged tail
+     * before it can resume normal replication, or "committed" would stop
+     * meaning "on every in-sync replica". A no-op if we're not actually
+     * ahead of the given offset — callers are expected to check that
+     * themselves, but this stays safe either way.
+     */
+    public void truncateTo(long newEndOffsetExclusive) {
+        if (newEndOffsetExclusive >= nextOffset) {
+            return;
+        }
+        try {
+            // A segment entirely at or past the cutoff is discarded whole,
+            // the same "never partially delete a segment" rule retention
+            // already follows (PRD §6.5) — just triggered by divergence
+            // instead of age/size. Never drop the very last segment this
+            // way; it's replaced below instead of leaving zero segments.
+            while (segments.size() > 1 && segments.get(segments.size() - 1).baseOffset() >= newEndOffsetExclusive) {
+                segments.remove(segments.size() - 1).deleteFiles();
+            }
+            LogSegment last = activeSegment();
+            if (last.baseOffset() >= newEndOffsetExclusive) {
+                // Even the sole remaining segment starts at or past the
+                // cutoff (this replica was so far ahead — or so far
+                // behind the new leader's retention window — that nothing
+                // survives): replace it with a fresh, empty one exactly
+                // at the new end offset rather than leaving a segment
+                // whose own baseOffset is inconsistent with the log's end.
+                segments.remove(0).deleteFiles();
+                segments.add(LogSegment.createNew(dir, newEndOffsetExclusive, config.indexIntervalBytes()));
+            } else {
+                last.truncateTo(newEndOffsetExclusive);
+            }
+            nextOffset = newEndOffsetExclusive;
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to truncate partition log at " + dir, e);
         }
     }
 

@@ -87,6 +87,28 @@ final class OffsetIndex {
         return bestPosition;
     }
 
+    /**
+     * Drops every entry pointing at or past {@code maxPositionExclusive}
+     * and rewrites the file to match — the index-side half of M4's log
+     * truncation on divergence (PRD §8.3): entries before the cutoff stay
+     * exactly as they were (still valid, still pointing at real batches
+     * that survive the truncation), so this only ever shrinks the file,
+     * never needs a full rebuild the way crash recovery does.
+     */
+    void truncateToPosition(int maxPositionExclusive) throws IOException {
+        entries.removeIf(entry -> entry[1] >= maxPositionExclusive);
+        channel.truncate(0);
+        long writePosition = 0;
+        for (int[] entry : entries) {
+            ByteBuffer buf = ByteBuffer.allocate(ENTRY_SIZE);
+            buf.putInt(entry[0]);
+            buf.putInt(entry[1]);
+            buf.flip();
+            channel.write(buf, writePosition);
+            writePosition += ENTRY_SIZE;
+        }
+    }
+
     void close() throws IOException {
         channel.close();
     }

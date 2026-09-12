@@ -6,6 +6,8 @@ import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.Errors;
 import com.advaith.broker.protocol.ProtocolReader;
 import com.advaith.broker.protocol.ProtocolWriter;
+import com.advaith.broker.replication.ReplicaManager;
+import com.advaith.broker.replication.ReplicationConfig;
 
 import java.util.List;
 import java.util.Optional;
@@ -19,6 +21,18 @@ import java.util.Optional;
  * segments and no time index (that's M2), so only the two sentinel
  * timestamps are implemented; anything else reports "no match" rather than
  * pretending to search.
+ *
+ * Since M4 (PRD §8.4): "latest" must resolve to the high-water mark, not
+ * the leader's raw {@code logEndOffset()} — the exact same ceiling
+ * {@link FetchHandler} enforces on reads, for the exact same reason (a
+ * consumer must never even be TOLD about an offset that isn't yet
+ * confirmed on every in-sync replica, let alone read one). Getting this
+ * one out of sync with Fetch's own cap wouldn't be a correctness bug by
+ * itself (Fetch would still refuse to serve the extra data), but a
+ * consumer that seeks to "latest" and then long-polls forever at an
+ * offset the broker itself will never actually satisfy is exactly the
+ * kind of silent, confusing inconsistency this project's own working
+ * agreement (PRD §0) exists to catch before a real client finds it.
  */
 public final class ListOffsetsHandler implements ApiHandler {
 
@@ -26,9 +40,17 @@ public final class ListOffsetsHandler implements ApiHandler {
     private static final long LATEST = -1;
 
     private final LogManager logManager;
+    private final ReplicaManager replicaManager;
 
     public ListOffsetsHandler(LogManager logManager) {
+        // Single-broker default (see ReplicaManager's javadoc): HWM ==
+        // raw log end, matching this class's pre-M4 behavior exactly.
+        this(logManager, new ReplicaManager(0, logManager, ReplicationConfig.singleBrokerDefault()));
+    }
+
+    public ListOffsetsHandler(LogManager logManager, ReplicaManager replicaManager) {
         this.logManager = logManager;
+        this.replicaManager = replicaManager;
     }
 
     @Override
@@ -77,7 +99,7 @@ public final class ListOffsetsHandler implements ApiHandler {
             return new PartitionResult(partitionIndex, Errors.NONE, -1, log.logStartOffset());
         }
         if (requestedTimestamp == LATEST) {
-            return new PartitionResult(partitionIndex, Errors.NONE, -1, log.logEndOffset());
+            return new PartitionResult(partitionIndex, Errors.NONE, -1, replicaManager.highWaterMark(topicName, partitionIndex));
         }
         // Arbitrary timestamp lookup needs a time index we don't have in M1
         // (see class javadoc). Real Kafka's own convention for "nothing

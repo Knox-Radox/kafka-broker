@@ -207,6 +207,22 @@ final class LogSegment {
      * from a file instead of a List.
      */
     byte[] read(long fromOffset, int maxBytes) throws IOException {
+        return read(fromOffset, maxBytes, Long.MAX_VALUE);
+    }
+
+    /**
+     * Same contract as the two-arg read(), plus a hard ceiling: no batch
+     * whose baseOffset is {@code >= ceilingOffsetExclusive} is ever
+     * included, even if maxBytes has room left. Added in M4 (PRD §8.4) so
+     * a normal consumer's Fetch can be capped at the high-water mark —
+     * data the leader has locally but that isn't yet confirmed on every
+     * in-sync replica must not be handed out, or a consumer could read a
+     * record that turns out to have never durably existed at all (see
+     * FetchHandler's javadoc for the exact failure this prevents). Replica
+     * fetches pass Long.MAX_VALUE (via the two-arg overload) because a
+     * follower must be able to catch up to the raw log end, past the HWM.
+     */
+    byte[] read(long fromOffset, int maxBytes, long ceilingOffsetExclusive) throws IOException {
         int approxStart = index.lookup((int) (fromOffset - baseOffset));
 
         ByteBuffer fileContents = ByteBuffer.allocate((int) (sizeBytes - approxStart));
@@ -233,11 +249,17 @@ final class LogSegment {
 
         // Phase 2: collect whole batches from there, bounded by maxBytes —
         // except the first is always included even if it alone exceeds the
-        // budget, so a fetch never wedges behind one oversized batch.
+        // budget, so a fetch never wedges behind one oversized batch. The
+        // ceiling check comes first and applies even to that first batch:
+        // an under-sized (possibly empty) response is fine, a response
+        // that leaks past the high-water mark is not.
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         position = collectFrom;
         while (position < bytes.length) {
             RecordBatch.BatchLocation location = RecordBatch.peekLocation(bytes, position);
+            if (location.baseOffset() >= ceilingOffsetExclusive) {
+                break;
+            }
             if (out.size() > 0 && out.size() + location.totalSizeInBytes() > maxBytes) {
                 break;
             }
@@ -245,6 +267,42 @@ final class LogSegment {
             position += location.totalSizeInBytes();
         }
         return out.toByteArray();
+    }
+
+    /**
+     * Discards every batch whose baseOffset is {@code >=
+     * newEndOffsetExclusive} — M4's log truncation on divergence (PRD
+     * §8.3). The caller (PartitionLog) guarantees the cutoff is always
+     * batch-aligned: it's always some OTHER replica's own logEndOffset,
+     * which by definition is exactly "one past the last record", i.e.
+     * exactly where the next batch would start — so this never needs to
+     * split a batch, only find the boundary between two of them. Unlike
+     * recoverAsActive() (which re-validates CRCs to find where a torn
+     * write ends), this trusts every batch here — it was already valid
+     * when this segment accepted it — and only cares about the offset
+     * boundary, not corruption.
+     */
+    void truncateTo(long newEndOffsetExclusive) throws IOException {
+        ByteBuffer wholeSegment = ByteBuffer.allocate((int) sizeBytes);
+        logChannel.read(wholeSegment, 0);
+        byte[] bytes = wholeSegment.array();
+
+        int truncateAtBytePosition = (int) sizeBytes; // default: nothing here needs discarding
+        int position = 0;
+        while (position < bytes.length) {
+            RecordBatch.BatchLocation location = RecordBatch.peekLocation(bytes, position);
+            if (location.baseOffset() >= newEndOffsetExclusive) {
+                truncateAtBytePosition = position;
+                break;
+            }
+            position += location.totalSizeInBytes();
+        }
+
+        logChannel.truncate(truncateAtBytePosition);
+        sizeBytes = truncateAtBytePosition;
+        nextOffsetAfterContents = newEndOffsetExclusive;
+        bytesSinceLastIndexEntry = 0;
+        index.truncateToPosition(truncateAtBytePosition);
     }
 
     long lastModifiedMillis() throws IOException {
