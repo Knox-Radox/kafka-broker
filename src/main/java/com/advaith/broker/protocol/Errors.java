@@ -23,4 +23,19 @@ public final class Errors {
     public static final short UNKNOWN_MEMBER_ID = 25;
     public static final short INVALID_SESSION_TIMEOUT = 26;
     public static final short REBALANCE_IN_PROGRESS = 27;
+
+    // M4 replication (PRD §8.5/§8.6): a request landed on a broker that
+    // isn't (or no longer is) the partition's leader — the client's fix is
+    // to refresh Metadata and retry against whoever the leader actually is
+    // now, not to retry the same broker.
+    public static final short NOT_LEADER_OR_FOLLOWER = 6;
+    // acks=-1 parked waiting for the high-water mark to catch up to what
+    // was just appended (PRD §8.6), and it never did within the request's
+    // own timeout_ms — e.g. the ISR shrank to just the leader and stayed
+    // there. The data IS on the leader's local log (the append itself
+    // already succeeded); what didn't happen in time is enough replicas
+    // confirming it, which is exactly what this real Kafka error code
+    // names (as opposed to REQUEST_TIMED_OUT, which would wrongly imply
+    // nothing happened at all).
+    public static final short NOT_ENOUGH_REPLICAS_AFTER_APPEND = 20;
 }

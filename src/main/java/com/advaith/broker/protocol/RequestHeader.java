@@ -9,6 +9,26 @@ package com.advaith.broker.protocol;
  */
 public record RequestHeader(short apiKey, short apiVersion, int correlationId, String clientId) {
 
+    /**
+     * The write-side counterpart of {@link #parse}, needed since M4 (PRD
+     * §8.2): every broker is now also a CLIENT of its peers (the replica
+     * fetch loop), so something on this side of the wire has to build a
+     * request header, not just decode one. Mirrors parse()'s exact version
+     * rules so a request this broker sends is byte-identical in shape to
+     * one a real client would send at the same header version.
+     */
+    public void write(ProtocolWriter writer, short headerVersion) {
+        writer.writeInt16(apiKey);
+        writer.writeInt16(apiVersion);
+        writer.writeInt32(correlationId);
+        if (headerVersion >= 1) {
+            writer.writeNullableString(clientId);
+        }
+        if (headerVersion >= 2) {
+            writer.writeEmptyTagBuffer();
+        }
+    }
+
     public static RequestHeader parse(ProtocolReader reader) {
         short apiKey = reader.readInt16();
         short apiVersion = reader.readInt16();

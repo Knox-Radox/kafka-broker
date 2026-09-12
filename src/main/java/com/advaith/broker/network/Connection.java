@@ -120,15 +120,31 @@ public final class Connection {
         return !buf.hasRemaining();
     }
 
-    /** Queues a fully-framed response (size prefix already included) for writing. */
+    /**
+     * Queues a fully-framed response (size prefix already included) for
+     * writing. A cancelled key here (see JOURNAL.md, 2026-09-12) means the
+     * client on the other end is already gone by the time this got
+     * called — routine for a DEFERRED response (a parked Fetch/Produce
+     * completed later by a tick or another connection's traffic, since
+     * M3/M4), never possible for an immediate one (RequestDispatcher calls
+     * this on the same connection whose own read event it's still
+     * handling). Nothing to send it to any more — drop it and move on,
+     * the same "one bad connection can't take anything else down" spirit
+     * as NetworkServer's own per-key exception handling.
+     */
     public void enqueueResponse(ByteBuffer framedResponse) {
-        pendingWrites.addLast(framedResponse);
-        // Only ask the selector to tell us about write-readiness while we
-        // actually have something to write. OP_WRITE is ready almost all
-        // the time on an idle socket (the kernel send buffer has room), so
-        // leaving it registered permanently turns select() into a busy loop
-        // that never blocks — 100% CPU for no work done.
-        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+        try {
+            pendingWrites.addLast(framedResponse);
+            // Only ask the selector to tell us about write-readiness while
+            // we actually have something to write. OP_WRITE is ready
+            // almost all the time on an idle socket (the kernel send
+            // buffer has room), so leaving it registered permanently turns
+            // select() into a busy loop that never blocks — 100% CPU for
+            // no work done.
+            key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+        } catch (CancelledKeyException e) {
+            log.debug("dropping a deferred response to {}: connection already closed", remoteAddress);
+        }
     }
 
     /** Called when the selector reports this channel is writable. */

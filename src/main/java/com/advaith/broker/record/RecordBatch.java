@@ -118,6 +118,23 @@ public final class RecordBatch {
     }
 
     /**
+     * Patches partitionLeaderEpoch (the field parse() reads and discards
+     * above) with the epoch this batch was actually accepted under —
+     * PRD §8.5: "a field the record batch format has already carried,
+     * unused, since M1's §5.4". Only the LEADER calls this, only at the
+     * moment it accepts a client's Produce (ProduceHandler, mirroring how
+     * rewriteBaseOffset is called at the same moment) — a follower
+     * replaying already-stamped batches from its leader must NOT call this
+     * again with its own local epoch belief, or it would overwrite real
+     * history with what could be a stale or simply irrelevant value. Safe
+     * post-hoc for the same reason baseOffset is: CRC coverage excludes
+     * this field (see parse()).
+     */
+    public static void rewritePartitionLeaderEpoch(byte[] batchBytes, int epoch) {
+        ByteBuffer.wrap(batchBytes).putInt(12, epoch);
+    }
+
+    /**
      * Reads just enough of a batch's header (baseOffset, batchLength) to
      * know where the batch starts and how many total bytes it occupies —
      * deliberately WITHOUT running CRC/magic validation. This is what the
