@@ -17,13 +17,25 @@ import java.util.List;
  * never anything the producer sent, and (2) acks=0 means literally no
  * response at all — not an empty one, none — which this handler expresses
  * by returning null and letting RequestDispatcher's contract handle it.
+ *
+ * Since M3 (PRD §7.3): every successful append also notifies a
+ * {@link FetchCompletionListener} — the other half of long-polling's
+ * "wake a parked Fetch the instant qualifying data lands" path, so a
+ * consumer doesn't have to wait for the next timer tick to hear about new
+ * data on the exact partition it's watching.
  */
 public final class ProduceHandler implements ApiHandler {
 
     private final LogManager logManager;
+    private final FetchCompletionListener fetchCompletionListener;
 
     public ProduceHandler(LogManager logManager) {
+        this(logManager, FetchCompletionListener.NONE);
+    }
+
+    public ProduceHandler(LogManager logManager, FetchCompletionListener fetchCompletionListener) {
         this.logManager = logManager;
+        this.fetchCompletionListener = fetchCompletionListener;
     }
 
     @Override
@@ -32,7 +44,7 @@ public final class ProduceHandler implements ApiHandler {
     }
 
     @Override
-    public byte[] handle(short apiVersion, ProtocolReader request) {
+    public byte[] handle(RequestContext context, ProtocolReader request) {
         String transactionalId = request.readNullableString();
         short acks = request.readInt16();
         request.readInt32(); // timeout_ms — M1 always answers immediately; there's nothing to time out on
@@ -80,6 +92,7 @@ public final class ProduceHandler implements ApiHandler {
         try {
             RecordBatch batch = RecordBatch.parse(recordsBytes);
             long baseOffset = partitionLog.get().append(recordsBytes, batch.recordCount());
+            fetchCompletionListener.onAppended(topicName, index);
             return new PartitionResult(index, Errors.NONE, baseOffset);
         } catch (RecordBatch.InvalidRecordBatchException e) {
             return new PartitionResult(index, e.errorCode, -1);

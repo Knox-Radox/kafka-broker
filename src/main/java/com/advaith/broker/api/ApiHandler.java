@@ -15,10 +15,19 @@ public interface ApiHandler {
     ApiKey apiKey();
 
     /**
-     * @param request positioned immediately after the request header
+     * @param context correlation ID / header version / connection for this
+     *                 request — a handler only needs this if it must send
+     *                 its own response later instead of returning it here
+     *                 (see {@link RequestContext#sendAsync}; Fetch
+     *                 long-polling, PRD §7.3, is the first and so far only
+     *                 handler that does)
+     * @param request  positioned immediately after the request header
      * @return the encoded response body, or {@code null} to send no
-     *         response at all — the only defined case for this in M1 is
-     *         Produce with {@code acks=0} (PRD §5.3).
+     *         response through the normal synchronous path — either
+     *         because none is ever due (Produce with {@code acks=0}, PRD
+     *         §5.3), or because the handler already sent one itself via
+     *         {@code context.sendAsync(...)} and there is nothing left for
+     *         RequestDispatcher to do.
      */
-    byte[] handle(short apiVersion, ProtocolReader request);
+    byte[] handle(RequestContext context, ProtocolReader request);
 }

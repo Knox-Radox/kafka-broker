@@ -5,13 +5,11 @@ import com.advaith.broker.network.RequestFrame;
 import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.HeaderVersions;
 import com.advaith.broker.protocol.ProtocolReader;
-import com.advaith.broker.protocol.ProtocolWriter;
 import com.advaith.broker.protocol.RequestHeader;
-import com.advaith.broker.protocol.ResponseHeader;
+import com.advaith.broker.protocol.ResponseFramer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -78,9 +76,14 @@ public final class RequestDispatcher implements FrameHandler {
             return;
         }
 
+        short responseHeaderVersion = HeaderVersions.lookup(header.apiKey(), header.apiVersion())
+                .responseHeaderVersion();
+        RequestContext context = new RequestContext(
+                header.apiVersion(), header.correlationId(), responseHeaderVersion, frame.connection());
+
         byte[] responseBody;
         try {
-            responseBody = handler.handle(header.apiVersion(), reader);
+            responseBody = handler.handle(context, reader);
         } catch (RuntimeException e) {
             log.warn("handler for {} failed on request from {}, closing connection",
                     handler.apiKey(), frame.connection().remoteAddress(), e);
@@ -89,21 +92,15 @@ public final class RequestDispatcher implements FrameHandler {
         }
 
         if (responseBody == null) {
-            return; // e.g. Produce acks=0: protocol defines no response at all
+            // Either genuinely no response is ever due (Produce acks=0), or
+            // the handler already sent its own via context.sendAsync() —
+            // e.g. an immediately-satisfiable Fetch still returns bytes
+            // here normally, but one it had to park (PRD §7.3) answers
+            // later, from outside this call, using the identical framing
+            // ResponseFramer gives both paths.
+            return;
         }
 
-        short responseHeaderVersion = HeaderVersions.lookup(header.apiKey(), header.apiVersion())
-                .responseHeaderVersion();
-
-        ProtocolWriter fullResponse = new ProtocolWriter(responseBody.length + 8);
-        new ResponseHeader(header.correlationId()).write(fullResponse, responseHeaderVersion);
-        fullResponse.writeRawBytes(responseBody);
-        byte[] responseBytes = fullResponse.toByteArray();
-
-        ByteBuffer framed = ByteBuffer.allocate(4 + responseBytes.length);
-        framed.putInt(responseBytes.length);
-        framed.put(responseBytes);
-        framed.flip(); // switch to read mode: Connection.enqueueResponse only ever reads from this
-        frame.connection().enqueueResponse(framed);
+        frame.connection().enqueueResponse(ResponseFramer.frame(header.correlationId(), responseHeaderVersion, responseBody));
     }
 }

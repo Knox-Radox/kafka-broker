@@ -37,7 +37,7 @@ public final class ListOffsetsHandler implements ApiHandler {
     }
 
     @Override
-    public byte[] handle(short apiVersion, ProtocolReader request) {
+    public byte[] handle(RequestContext context, ProtocolReader request) {
         request.readInt32(); // replica_id — always -1 from a normal consumer in M1
 
         List<TopicResult> results = request.readArray(this::readTopic);

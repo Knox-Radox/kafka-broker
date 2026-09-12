@@ -22,7 +22,8 @@ public final class ApiVersionsHandler implements ApiHandler {
     }
 
     @Override
-    public byte[] handle(short apiVersion, ProtocolReader request) {
+    public byte[] handle(RequestContext context, ProtocolReader request) {
+        short apiVersion = context.apiVersion();
         if (!ApiKey.API_VERSIONS.supportsVersion(apiVersion)) {
             return unsupportedVersionResponseV0();
         }

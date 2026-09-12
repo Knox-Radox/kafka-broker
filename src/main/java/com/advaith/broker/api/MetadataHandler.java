@@ -1,6 +1,7 @@
 package com.advaith.broker.api;
 
 import com.advaith.broker.BrokerConfig;
+import com.advaith.broker.group.GroupCoordinator;
 import com.advaith.broker.log.LogManager;
 import com.advaith.broker.protocol.ApiKey;
 import com.advaith.broker.protocol.Errors;
@@ -35,11 +36,18 @@ public final class MetadataHandler implements ApiHandler {
     }
 
     @Override
-    public byte[] handle(short apiVersion, ProtocolReader request) {
+    public byte[] handle(RequestContext context, ProtocolReader request) {
         List<String> requestedTopics = request.readArray(ProtocolReader::readString); // null = "all topics"
         request.readBoolean(); // allow_auto_topic_creation — ignored, M1 never auto-creates (PRD §5.1)
 
-        List<String> topicsToDescribe = requestedTopics != null ? requestedTopics : List.copyOf(logManager.topicNames());
+        // "all topics" must not leak the internal offsets topic (PRD §7.4)
+        // — real Kafka excludes __consumer_offsets from an unscoped listing
+        // too, though (like real Kafka) explicitly naming it still resolves
+        // it normally below, since nothing about it needs hiding from a
+        // client that already knows what it's asking for.
+        List<String> topicsToDescribe = requestedTopics != null
+                ? requestedTopics
+                : logManager.topicNames().stream().filter(name -> !name.equals(GroupCoordinator.OFFSETS_TOPIC)).toList();
 
         ProtocolWriter response = new ProtocolWriter();
         response.writeInt32(0); // throttle_time_ms
@@ -69,7 +77,7 @@ public final class MetadataHandler implements ApiHandler {
 
         w.writeInt16(Errors.NONE);
         w.writeString(topicName);
-        w.writeBoolean(false); // is_internal — M1 defines no internal topics (e.g. no __consumer_offsets yet; that's M3)
+        w.writeBoolean(topicName.equals(GroupCoordinator.OFFSETS_TOPIC)); // is_internal (PRD §7.4)
 
         int partitionCount = logManager.partitionCount(topicName);
         List<Integer> partitionIndices = java.util.stream.IntStream.range(0, partitionCount).boxed().toList();
